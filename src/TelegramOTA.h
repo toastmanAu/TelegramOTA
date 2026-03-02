@@ -9,6 +9,10 @@
  *
  * Pairs naturally with TelegramSerial for full remote dev loop.
  *
+ * Transport options (set in platformio.ini build_flags or before #include):
+ *   Default:           WiFi (WiFiClientSecure) — no extra dependencies
+ *   -D TOTA_USE_GSM    Cellular via TinyGSM — call begin() after modem is up
+ *
  * Author: Wyltek Industries / toastmanAu
  * License: MIT
  */
@@ -17,10 +21,35 @@
 #define TELEGRAM_OTA_H
 
 #include <Arduino.h>
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <functional>
+
+// ── Transport selection ───────────────────────────────────────────────────────
+//
+// Default: WiFi (WiFiClientSecure). No changes needed for normal ESP32 use.
+//
+// For cellular (TinyGSM boards — T-SIM7080G-S3, T-A7670, etc):
+//   Add to platformio.ini build_flags: -D TOTA_USE_GSM
+//   Also define your modem type BEFORE this header:
+//     #define TINY_GSM_MODEM_SIM7672   (or A7670, SIM800, etc)
+//     #include <TinyGsmClient.h>
+//   Then pass your TinyGsm modem to begin():
+//     ota.begin("1.0.0", &modem);
+//
+// Note: GSM mode does NOT initialise the modem — call startModem() or
+// your own modem init first. TelegramOTA just borrows the connection.
+
+#ifdef TOTA_USE_GSM
+  #ifndef TINY_GSM_MODEM_SIM7672
+    #warning "TOTA_USE_GSM defined but no modem type set. Add e.g. #define TINY_GSM_MODEM_SIM7672 before including TelegramOTA.h"
+  #endif
+  #include <TinyGsmClient.h>
+  #define TOTA_CLIENT_TYPE TinyGsmClientSecure
+#else
+  #include <WiFiClientSecure.h>
+  #define TOTA_CLIENT_TYPE WiFiClientSecure
+#endif
 
 // ── Config defaults (override before #include or in platformio.ini) ───────────
 
@@ -46,8 +75,8 @@
 
 // ── Callback types ────────────────────────────────────────────────────────────
 
-using TOTAFlashCallback   = std::function<void(bool success, const String& msg)>;
-using TOTACommandCallback = std::function<bool(const String& cmd, const String& args)>;
+using TOTAFlashCallback    = std::function<void(bool success, const String& msg)>;
+using TOTACommandCallback  = std::function<bool(const String& cmd, const String& args)>;
 using TOTAProgressCallback = std::function<void(size_t written, size_t total)>;
 
 // ── Flash result ──────────────────────────────────────────────────────────────
@@ -71,97 +100,80 @@ public:
     /**
      * @param botToken   Telegram bot token (from @BotFather)
      * @param chatId     Authorised chat ID — only this chat can trigger OTA
-     *                   Get yours: message @userinfobot
      */
     TelegramOTA(const String& botToken, const String& chatId);
 
     // ── Setup ─────────────────────────────────────────────────────────────────
 
     /**
-     * Call once in setup(). Sends startup message to your chat if connected.
-     * @param appVersion  Optional version string reported by /version command
-     *                    e.g. "1.2.0" or __DATE__ " " __TIME__
+     * Call once in setup() after WiFi (or modem) is connected.
+     * @param appVersion  Optional version string e.g. "1.2.0"
+     * @param modem       GSM mode only: pointer to your TinyGsm modem instance
      */
+#ifdef TOTA_USE_GSM
+    void begin(const String& appVersion = "", TinyGsm* modem = nullptr);
+#else
     void begin(const String& appVersion = "");
+#endif
 
     /**
-     * Call in loop(). Polls Telegram, handles commands, triggers OTA if needed.
+     * Call in loop(). Polls Telegram, handles commands, triggers OTA.
      * Non-blocking between polls — safe to call every loop iteration.
      */
     void handle();
 
     // ── Callbacks ─────────────────────────────────────────────────────────────
 
-    /** Called after a flash attempt (success or failure) */
-    void onFlash(TOTAFlashCallback cb)      { _flashCb = cb; }
-
-    /** Called during flash with bytes written + total size */
+    void onFlash(TOTAFlashCallback cb)       { _flashCb = cb; }
     void onProgress(TOTAProgressCallback cb) { _progressCb = cb; }
 
     /**
      * Register a custom command handler. Return true if you handled it,
      * false to let TelegramOTA process it normally.
-     * Example: ota.onCommand([](const String& cmd, const String& args) {
-     *     if (cmd == "/sensor") { sendReading(); return true; }
-     *     return false;
-     * });
      */
-    void onCommand(TOTACommandCallback cb)  { _commandCb = cb; }
+    void onCommand(TOTACommandCallback cb)   { _commandCb = cb; }
 
     // ── Config ────────────────────────────────────────────────────────────────
 
-    /** Allow additional chat IDs (e.g. a group) */
     void addAuthorisedChat(const String& chatId);
+    void setInsecure(bool insecure = true)   { _insecure = insecure; }
+    void setCACert(const char* cert)         { _caCert = cert; }
+    void setDeviceName(const String& name)   { _deviceName = name; }
 
-    /** Skip TLS cert verification (easier setup, less secure) */
-    void setInsecure(bool insecure = true)  { _insecure = insecure; }
+    // ── Log buffer ────────────────────────────────────────────────────────────
 
-    /** Set custom root CA cert for Telegram API */
-    void setCACert(const char* cert)        { _caCert = cert; }
-
-    /** Set device name shown in status messages */
-    void setDeviceName(const String& name)  { _deviceName = name; }
-
-    // ── Log buffer (for /log command) ─────────────────────────────────────────
-
-    /**
-     * Append a line to the in-memory log ring buffer.
-     * Call this wherever you'd normally Serial.println().
-     * Accessible via /log command from Telegram.
-     */
     void log(const String& line);
 
     // ── Manual triggers ───────────────────────────────────────────────────────
 
-    /** Send a message to the authorised chat */
     bool sendMessage(const String& text);
-
-    /** Trigger OTA from a URL directly (e.g. from your own CI) */
     TOTAResult flashFromUrl(const String& url, size_t expectedSize = 0);
 
 private:
-    // ── Telegram API ──────────────────────────────────────────────────────────
-
-    String  _botToken;
-    String  _chatId;
-    String  _appVersion;
-    String  _deviceName;
-    bool    _insecure    = true;        // default insecure for ease of use
+    String   _botToken;
+    String   _chatId;
+    String   _appVersion;
+    String   _deviceName;
+    bool     _insecure   = true;
     const char* _caCert  = nullptr;
-
-    int64_t _lastUpdateId = 0;
-    uint32_t _lastPollMs  = 0;
+    int64_t  _lastUpdateId = 0;
+    uint32_t _lastPollMs   = 0;
 
     std::vector<String> _authorisedChats;
     String  _logBuffer[TOTA_LOG_BUFFER_LINES];
-    int     _logHead = 0;
+    int     _logHead  = 0;
     int     _logCount = 0;
 
     TOTAFlashCallback    _flashCb    = nullptr;
     TOTAProgressCallback _progressCb = nullptr;
     TOTACommandCallback  _commandCb  = nullptr;
 
-    // ── Internal methods ──────────────────────────────────────────────────────
+#ifdef TOTA_USE_GSM
+    TinyGsm*             _modem = nullptr;
+    TinyGsmClientSecure  _client;
+#else
+    WiFiClientSecure     _client;
+#endif
 
     void        _poll();
     void        _handleUpdate(const String& json);
@@ -175,8 +187,6 @@ private:
     bool        _isAuthorised(const String& chatId);
     String      _buildStatusMessage();
     String      _dumpLog();
-
-    WiFiClientSecure _client;
 };
 
 #endif // TELEGRAM_OTA_H

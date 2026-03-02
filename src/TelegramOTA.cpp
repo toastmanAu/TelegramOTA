@@ -5,6 +5,11 @@
 #include "TelegramOTA.h"
 #include <ArduinoJson.h>
 
+// Transport note:
+// In WiFi mode:  _client is WiFiClientSecure, configured with CA cert or setInsecure()
+// In GSM mode:   _client is TinyGsmClientSecure, modem pointer set in begin()
+//                The modem must already be initialised — we just borrow the connection.
+
 // Telegram API root CA (DigiCert Global Root G2, expires 2038)
 // Update if Telegram changes their cert chain
 static const char TELEGRAM_ROOT_CA[] PROGMEM = R"EOF(
@@ -41,6 +46,23 @@ TelegramOTA::TelegramOTA(const String& botToken, const String& chatId)
 
 // ── begin() ───────────────────────────────────────────────────────────────────
 
+#ifdef TOTA_USE_GSM
+void TelegramOTA::begin(const String& appVersion, TinyGsm* modem) {
+    _appVersion = appVersion;
+    _modem = modem;
+    if (_deviceName.isEmpty()) {
+        _deviceName = "ESP32-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+    }
+    // TinyGsmClientSecure is initialised with the modem reference
+    if (_modem) {
+        _client = TinyGsmClientSecure(*_modem);
+    }
+    String msg = "🟢 *" + _deviceName + "* online (GSM)";
+    if (!_appVersion.isEmpty()) msg += " — v" + _appVersion;
+    msg += "\n_Ready for OTA. Send /help for commands._";
+    sendMessage(msg);
+}
+#else
 void TelegramOTA::begin(const String& appVersion) {
     _appVersion = appVersion;
     if (_deviceName.isEmpty()) {
@@ -61,6 +83,7 @@ void TelegramOTA::begin(const String& appVersion) {
     msg += "\n_Ready for OTA. Send /help for commands._";
     sendMessage(msg);
 }
+#endif
 
 // ── handle() ─────────────────────────────────────────────────────────────────
 
