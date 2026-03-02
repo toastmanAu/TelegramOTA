@@ -378,13 +378,20 @@ bool TelegramOTA::sendMessage(const String& text) {
     WiFiClientSecure msgClient;
     msgClient.setInsecure();
 
-    String url = "https://api.telegram.org/bot" + _botToken
-               + "/sendMessage?chat_id=" + _chatId
-               + "&parse_mode=Markdown"
-               + "&text=" + text;  // TODO: proper URL encode for production
-
+    String url = "https://api.telegram.org/bot" + _botToken + "/sendMessage";
     if (!http.begin(msgClient, url)) return false;
-    int code = http.GET();
+
+    // POST with JSON body — handles spaces, markdown, special chars correctly
+    JsonDocument doc;
+    doc["chat_id"]    = _chatId;
+    doc["text"]       = text;
+    doc["parse_mode"] = "Markdown";
+
+    String body;
+    serializeJson(doc, body);
+
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(body);
     http.end();
     return (code == HTTP_CODE_OK);
 }
